@@ -2366,6 +2366,7 @@
     "HookHandlerConfig": {
       "oneOf": [
         {
+          "additionalProperties": false,
           "properties": {
             "additionalContextLimit": {
               "description": "Approximate token threshold for spilling this hook's `additionalContext` to disk. Unset uses 2,500 tokens; `0` disables spilling for this hook. The threshold is evaluated against the original context; a spilled preview also includes recovery metadata.",
@@ -2408,6 +2409,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "properties": {
             "input": {
               "additionalProperties": true,
@@ -2445,6 +2447,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "properties": {
             "type": {
               "enum": [
@@ -2459,6 +2462,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "properties": {
             "type": {
               "enum": [

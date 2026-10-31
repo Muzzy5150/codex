@@ -348,6 +348,28 @@ commandWindows = "powershell -File C:\\enterprise\\hooks\\pre.ps1"
 }
 
 #[test]
+fn hook_events_toml_rejects_unknown_handler_fields() {
+    for field in ["timeout_sec", "timout", "unexpected"] {
+        let source = format!(
+            r#"
+[[PreToolUse]]
+
+[[PreToolUse.hooks]]
+type = "command"
+command = "python3 /tmp/pre.py"
+{field} = 8
+"#
+        );
+        let error = toml::from_str::<HookEventsToml>(&source)
+            .expect_err("unknown TOML hook handler field should be rejected");
+        assert!(
+            error.to_string().contains(field),
+            "error should name rejected field {field}: {error}"
+        );
+    }
+}
+
+#[test]
 fn hook_handler_omits_unset_additional_context_limit() {
     let handler = HookHandlerConfig::Command {
         command: "python3 /tmp/pre.py".to_string(),

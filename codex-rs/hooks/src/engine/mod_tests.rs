@@ -207,6 +207,29 @@ fn config_toml_with_pre_tool_use(command: &str) -> TomlValue {
     config_toml
 }
 
+fn replace_pre_tool_use_timeout(config: &mut TomlValue, field: &str, timeout: i64) {
+    let TomlValue::Table(config_table) = config else {
+        unreachable!("config TOML root should be a table");
+    };
+    let Some(TomlValue::Table(hooks)) = config_table.get_mut("hooks") else {
+        unreachable!("hooks should be a table");
+    };
+    let Some(TomlValue::Array(groups)) = hooks.get_mut("PreToolUse") else {
+        unreachable!("PreToolUse should be an array");
+    };
+    let Some(TomlValue::Table(group)) = groups.first_mut() else {
+        unreachable!("matcher group should be a table");
+    };
+    let Some(TomlValue::Array(handlers)) = group.get_mut("hooks") else {
+        unreachable!("hooks should be an array");
+    };
+    let Some(TomlValue::Table(handler)) = handlers.first_mut() else {
+        unreachable!("handler should be a table");
+    };
+    handler.remove("timeout");
+    handler.insert(field.to_string(), TomlValue::Integer(timeout));
+}
+
 fn requirements_with_managed_hooks_only(
     allow_managed_hooks_only: bool,
     managed_hooks: Option<ManagedHooksRequirementsToml>,
@@ -1758,6 +1781,150 @@ fn malformed_hooks_json_is_reported_as_startup_warning() {
         engine.warnings()[0]
     );
     assert!(engine.warnings()[0].contains("unknown field `SessionStart`"));
+}
+
+#[test]
+fn unknown_json_handler_field_blocks_activation_and_names_source() {
+    let temp = tempdir().expect("create temp dir");
+    let config_path =
+        AbsolutePathBuf::try_from(temp.path().join("config.toml")).expect("absolute config path");
+    let hooks_json_path =
+        AbsolutePathBuf::try_from(temp.path().join("hooks.json")).expect("absolute hooks path");
+    fs::write(
+        hooks_json_path.as_path(),
+        r#"{
+          "hooks": {
+            "PreToolUse": [{
+              "hooks": [{
+                "type": "command",
+                "command": "python3 /tmp/pre.py",
+                "timeout_sec": 8
+              }]
+            }]
+          }
+        }"#,
+    )
+    .expect("write hooks.json");
+    let mut config_toml = config_toml_with_pre_tool_use("python3 /tmp/valid-toml.py");
+    replace_pre_tool_use_timeout(&mut config_toml, "timeout", 8);
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![ConfigLayerEntry::new(
+            ConfigLayerSource::System { file: config_path },
+            config_toml,
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("config layer stack");
+
+    let engine = ClaudeHooksEngine::new(
+        /*enabled*/ true,
+        /*bypass_hook_trust*/ true,
+        Some(&config_layer_stack),
+        Vec::new(),
+        Vec::new(),
+        command_runtime(CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        }),
+        mcp_executor(),
+    );
+
+    assert_eq!(
+        engine
+            .handlers
+            .iter()
+            .map(|handler| handler.timeout_sec)
+            .collect::<Vec<_>>(),
+        vec![8]
+    );
+    assert!(matches!(
+        &engine.handlers[0].kind,
+        ConfiguredHandlerKind::Command { command, .. }
+            if command == "python3 /tmp/valid-toml.py"
+    ));
+    assert_eq!(engine.warnings().len(), 1);
+    assert!(engine.warnings()[0].contains("failed to parse hooks config"));
+    assert!(engine.warnings()[0].contains(&hooks_json_path.display().to_string()));
+    assert!(engine.warnings()[0].contains("unknown field `timeout_sec`"));
+    assert!(!engine.warnings()[0].contains("python3 /tmp/pre.py"));
+}
+
+#[test]
+fn unknown_toml_handler_field_blocks_activation_and_names_source() {
+    let temp = tempdir().expect("create temp dir");
+    let config_path =
+        AbsolutePathBuf::try_from(temp.path().join("config.toml")).expect("absolute config path");
+    let hooks_json_path =
+        AbsolutePathBuf::try_from(temp.path().join("hooks.json")).expect("absolute hooks path");
+    fs::write(
+        hooks_json_path.as_path(),
+        r#"{
+          "description": "Valid neighboring hooks",
+          "hooks": {
+            "PreToolUse": [{
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "python3 /tmp/eight-seconds.py",
+                  "timeout": 8
+                },
+                {
+                  "type": "command",
+                  "command": "python3 /tmp/default-timeout.py",
+                  "command_windows": "python C:\\tmp\\default-timeout.py"
+                }
+              ]
+            }]
+          }
+        }"#,
+    )
+    .expect("write hooks.json");
+    let mut config_toml = config_toml_with_pre_tool_use("python3 /tmp/invalid-toml.py");
+    replace_pre_tool_use_timeout(&mut config_toml, "timout", 8);
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![ConfigLayerEntry::new(
+            ConfigLayerSource::System {
+                file: config_path.clone(),
+            },
+            config_toml,
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("config layer stack");
+
+    let engine = ClaudeHooksEngine::new(
+        /*enabled*/ true,
+        /*bypass_hook_trust*/ true,
+        Some(&config_layer_stack),
+        Vec::new(),
+        Vec::new(),
+        command_runtime(CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        }),
+        mcp_executor(),
+    );
+
+    assert_eq!(
+        engine
+            .handlers
+            .iter()
+            .map(|handler| handler.timeout_sec)
+            .collect::<Vec<_>>(),
+        vec![8, 600]
+    );
+    assert!(engine.handlers.iter().all(|handler| matches!(
+        &handler.kind,
+        ConfiguredHandlerKind::Command { command, .. }
+            if command != "python3 /tmp/invalid-toml.py"
+    )));
+    assert_eq!(engine.warnings().len(), 1);
+    assert!(engine.warnings()[0].contains("failed to parse TOML hooks"));
+    assert!(engine.warnings()[0].contains(&config_path.display().to_string()));
+    assert!(engine.warnings()[0].contains("unknown field `timout`"));
+    assert!(!engine.warnings()[0].contains("python3 /tmp/invalid-toml.py"));
 }
 
 fn bundled_cleanup_source(plugin_id: &str, server: &str, event: &str) -> PluginHookSource {

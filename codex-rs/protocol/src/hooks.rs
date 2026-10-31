@@ -146,7 +146,7 @@ pub struct MatcherGroup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum HookHandlerConfig {
     #[serde(rename = "command")]
     Command {
@@ -210,4 +210,83 @@ where
         ));
     }
     Ok(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HookHandlerConfig;
+
+    #[test]
+    fn hook_handler_config_accepts_supported_fields_and_variants() {
+        for value in [
+            serde_json::json!({
+                "type": "command",
+                "command": "echo hello",
+                "command_windows": "Write-Output hello",
+                "timeout": 8,
+                "async": true,
+                "statusMessage": "checking",
+                "additionalContextLimit": 4096,
+            }),
+            serde_json::json!({
+                "type": "mcp_tool",
+                "server": "security",
+                "tool": "scan",
+                "input": {"path": "${tool_input.path}"},
+                "timeout": 8,
+                "statusMessage": "scanning",
+            }),
+            serde_json::json!({"type": "prompt"}),
+            serde_json::json!({"type": "agent"}),
+        ] {
+            serde_json::from_value::<HookHandlerConfig>(value)
+                .expect("supported hook handler should deserialize");
+        }
+    }
+
+    #[test]
+    fn hook_handler_config_rejects_unknown_fields_for_every_variant() {
+        for (field, value) in [
+            (
+                "timeout_sec",
+                serde_json::json!({
+                    "type": "command",
+                    "command": "echo hello",
+                    "timeout_sec": 8,
+                }),
+            ),
+            (
+                "timout",
+                serde_json::json!({
+                    "type": "command",
+                    "command": "echo hello",
+                    "timout": 8,
+                }),
+            ),
+            (
+                "unexpected",
+                serde_json::json!({
+                    "type": "mcp_tool",
+                    "server": "security",
+                    "tool": "scan",
+                    "unexpected": true,
+                }),
+            ),
+            (
+                "unexpected",
+                serde_json::json!({"type": "prompt", "unexpected": true}),
+            ),
+            (
+                "unexpected",
+                serde_json::json!({"type": "agent", "unexpected": true}),
+            ),
+        ] {
+            let error = serde_json::from_value::<HookHandlerConfig>(value)
+                .expect_err("unknown hook handler field should be rejected");
+            assert!(
+                error.to_string().contains(field),
+                "error should name rejected field {field}: {error}"
+            );
+        }
+    }
 }
