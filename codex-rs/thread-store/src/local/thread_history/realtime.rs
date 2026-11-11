@@ -46,7 +46,7 @@ pub(in crate::local) async fn list_timeline(
     validate_thread_for_paginated_reads(
         store,
         params.thread_id,
-        /*include_archived*/ false,
+        /*include_archived*/ true,
         "thread/timeline/list",
     )
     .await?;

@@ -22,6 +22,7 @@ use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
 use super::*;
+use crate::ArchiveThreadParams;
 use crate::ItemSortKey;
 use crate::ListItemsPosition;
 use crate::ListTimelineParams;
@@ -29,6 +30,8 @@ use crate::SearchThreadOccurrencesParams;
 use crate::SortDirection;
 use crate::StoredTurnError;
 use crate::StoredTurnStatus;
+use crate::ThreadStore;
+use crate::TimelinePage;
 use crate::local::test_support::test_config;
 
 #[tokio::test]
@@ -567,6 +570,89 @@ INSERT INTO thread_realtime_items (
         item_ids(&ordinary_items),
         vec!["before", "middle", "after", "closed"]
     );
+}
+
+#[tokio::test]
+async fn archived_timeline_preserves_pages_validation_and_thread_state() {
+    let (_home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let db = history_db(&store).await;
+    for (item_id, ordinal) in [("first", 10), ("second", 20), ("third", 30)] {
+        insert_item(db, thread_id, "turn-1", item_id, ordinal).await;
+    }
+
+    let unarchived_pages = timeline_pages(&store, thread_id, /*page_size*/ 2).await;
+    assert_eq!(unarchived_pages.len(), 2);
+    assert!(unarchived_pages[0].next_cursor.is_some());
+    assert!(unarchived_pages[1].next_cursor.is_none());
+
+    let invalid_cursor = store
+        .list_timeline(ListTimelineParams {
+            thread_id,
+            cursor: Some("not-a-timeline-cursor".to_string()),
+            page_size: 2,
+        })
+        .await
+        .expect_err("invalid timeline cursor");
+    assert!(matches!(
+        invalid_cursor,
+        ThreadStoreError::InvalidRequest { message }
+            if message == "invalid thread timeline cursor"
+    ));
+    let missing_thread = store
+        .list_timeline(ListTimelineParams {
+            thread_id: ThreadId::default(),
+            cursor: None,
+            page_size: 2,
+        })
+        .await
+        .expect_err("missing timeline thread");
+    assert!(matches!(
+        missing_thread,
+        ThreadStoreError::Unsupported {
+            operation: "thread/timeline/list"
+        }
+    ));
+
+    store
+        .archive_thread(ArchiveThreadParams { thread_id })
+        .await
+        .expect("archive timeline thread");
+    let state_db = store.state_db().await.expect("state runtime");
+    let archived_before = state_db
+        .get_thread(thread_id)
+        .await
+        .expect("read archived metadata")
+        .expect("archived thread metadata");
+    assert!(archived_before.archived_at.is_some());
+    let history_counts_before = timeline_history_counts(db, thread_id).await;
+
+    let archived_pages = timeline_pages(&store, thread_id, /*page_size*/ 2).await;
+    assert_eq!(archived_pages, unarchived_pages);
+    let archived_after = state_db
+        .get_thread(thread_id)
+        .await
+        .expect("reread archived metadata")
+        .expect("archived thread metadata");
+    assert_eq!(archived_after.archived_at, archived_before.archived_at);
+    assert_eq!(archived_after.rollout_path, archived_before.rollout_path);
+    assert_eq!(
+        timeline_history_counts(db, thread_id).await,
+        history_counts_before
+    );
+
+    let invalid_archived_cursor = store
+        .list_timeline(ListTimelineParams {
+            thread_id,
+            cursor: Some("not-a-timeline-cursor".to_string()),
+            page_size: 2,
+        })
+        .await
+        .expect_err("invalid archived timeline cursor");
+    assert!(matches!(
+        invalid_archived_cursor,
+        ThreadStoreError::InvalidRequest { message }
+            if message == "invalid thread timeline cursor"
+    ));
 }
 
 #[tokio::test]
@@ -1769,6 +1855,47 @@ async fn history_db(store: &LocalThreadStore) -> &sqlx::SqlitePool {
         .thread_history_db()
         .await
         .expect("open history fixture database")
+}
+
+async fn timeline_pages(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    page_size: usize,
+) -> Vec<TimelinePage> {
+    let mut pages = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store
+            .list_timeline(ListTimelineParams {
+                thread_id,
+                cursor,
+                page_size,
+            })
+            .await
+            .expect("list timeline page");
+        cursor = page.next_cursor.clone();
+        pages.push(page);
+        if cursor.is_none() {
+            return pages;
+        }
+    }
+}
+
+async fn timeline_history_counts(db: &sqlx::SqlitePool, thread_id: ThreadId) -> (i64, i64, i64) {
+    sqlx::query_as(
+        r#"
+SELECT
+    (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?),
+    (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?),
+    (SELECT COUNT(*) FROM thread_realtime_items WHERE thread_id = ?)
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind(thread_id.to_string())
+    .bind(thread_id.to_string())
+    .fetch_one(db)
+    .await
+    .expect("count timeline history rows")
 }
 
 #[allow(clippy::too_many_arguments)]

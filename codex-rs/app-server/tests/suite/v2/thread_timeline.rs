@@ -4,6 +4,8 @@ use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::SortDirection;
+use codex_app_server_protocol::ThreadArchiveParams;
+use codex_app_server_protocol::ThreadArchiveResponse;
 use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
@@ -192,7 +194,7 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
             request_id,
             params: ThreadTimelineListParams {
                 thread_id: thread_id.to_string(),
-                cursor: page.next_cursor,
+                cursor: page.next_cursor.clone(),
                 limit: Some(2),
             },
         })
@@ -229,6 +231,37 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() -> 
         .await?;
     assert_eq!(ordinary.data.len(), 1);
     assert_eq!(ordinary.data[0].turn_id, "turn-1");
+
+    let _: ThreadArchiveResponse = app_server
+        .request(|request_id| ClientRequest::ThreadArchive {
+            request_id,
+            params: ThreadArchiveParams {
+                thread_id: thread_id.to_string(),
+            },
+        })
+        .await?;
+    let archived_page: ThreadTimelineListResponse = app_server
+        .request(|request_id| ClientRequest::ThreadTimelineList {
+            request_id,
+            params: ThreadTimelineListParams {
+                thread_id: thread_id.to_string(),
+                cursor: None,
+                limit: Some(3),
+            },
+        })
+        .await?;
+    assert_eq!(archived_page, page);
+    let archived_older: ThreadTimelineListResponse = app_server
+        .request(|request_id| ClientRequest::ThreadTimelineList {
+            request_id,
+            params: ThreadTimelineListParams {
+                thread_id: thread_id.to_string(),
+                cursor: archived_page.next_cursor.clone(),
+                limit: Some(2),
+            },
+        })
+        .await?;
+    assert_eq!(archived_older, older);
 
     Ok(())
 }
